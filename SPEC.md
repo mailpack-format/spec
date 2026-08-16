@@ -79,7 +79,8 @@ recorded independently by other archives or observers can agree with it.
 ## 3. Terminology
 
 - **Object** — the raw bytes of one message as captured, identified by its SHA-256.
-- **Pack** — a sealed, immutable ZIP64 archive containing objects.
+- **Pack** — a sealed, immutable ZIP archive (ZIP64 extensions as needed, §6)
+  containing objects.
 - **Staging** — loose objects not yet sealed into a pack.
 - **Run** — one capture or maintenance operation, identified by a ULID, producing one
   manifest.
@@ -87,7 +88,8 @@ recorded independently by other archives or observers can agree with it.
 - **Chain** — the backward hash links (`prev_run`, `prev_sha256`) connecting each run
   to its predecessor's manifest bytes.
 - **End record** — a manifest's final record: counts plus the run's Merkle root. A
-  manifest with an end record is *complete*; without one it is *interrupted*.
+  manifest whose final line is a valid end record is *complete*; any other manifest
+  is *interrupted* (§8.5).
 - **Anchor** — an independent timestamp token (`.tsr`, `.ots`) over a run's seal
   target.
 - **Byte identity** — SHA-256 of an object's raw bytes. Governs storage and dedup.
@@ -238,8 +240,9 @@ Reader rules:
   values.
 - A final line lacking its terminating LF (a crash mid-append) MUST be tolerated and
   ignored — it is not part of the record sequence.
-- Any other unparseable line makes the manifest *manifest-malformed* (§18). Reporting
-  tools MUST still process the parseable records around it.
+- Any other unparseable line — an empty line included — makes the manifest
+  *manifest-malformed* (§18). Reporting tools MUST still process the parseable
+  records around it.
 
 ### 8.1 `run` record
 
@@ -255,6 +258,7 @@ The first line of every manifest MUST be a `run` record:
 ```
 
 - `run` — the run ULID; MUST match the file name.
+- `format_version` — the archive's format version (§4.1), `"MAJOR.MINOR"`. REQUIRED.
 - `archive_id` — the archive's ULID (§4.1); binds the run to its archive.
 - `prev_run` / `prev_sha256` — the chain link: the preceding run's ULID and the
   lowercase-hex SHA-256 of that run's manifest file — its exact bytes at link time,
@@ -266,9 +270,22 @@ The first line of every manifest MUST be a `run` record:
   (§12).
 
 Runs form a single backward chain: exactly one run has `prev_run: null`, and every
-other run's `prev_run` names an existing run. Two manifests naming the same
-`prev_run` are a *chain fork* (§18); a writer discovering a fork MUST refuse to
-append new runs until it is resolved.
+other run's `prev_run` names an existing run. Two manifests whose run records name
+the same `prev_run` — two claiming `null` included — are a *chain fork* (§18); a
+writer discovering a fork MUST refuse to append new runs until it is resolved.
+
+Header damage has defined semantics. A parseable first line that is not a `run`
+record, a `run` field that does not match the file name, or an `archive_id` that
+does not match the archive marker each make the manifest *manifest-malformed*
+(§18). A manifest with no parseable line at all is a *headerless crash artifact*:
+the §8 lifecycle creates the file at its final name before the run record is
+appended, so a crash in that window durably leaves one — it is an interrupted run
+with no records, a reported warning, never damage. A manifest lacking a parseable
+run record makes no chain claim: it takes no part in fork detection, and its own
+chain status is *not applicable*. A writer MUST refuse to append when the chain
+tip cannot be determined: on a fork, and on any manifest that has parseable
+records but no parseable run record (its chain position is unknowable). A
+headerless crash artifact with no records claims no position and blocks nothing.
 
 ### 8.2 `message` record
 
@@ -384,8 +401,15 @@ The last line of a complete manifest:
 - `messages`, `tombstones` — counts of those record types in this manifest. REQUIRED.
 - `root` — the run's Merkle root (§9). REQUIRED.
 
-A manifest whose last parseable record is an `end` record is *complete*; any other
-manifest is *interrupted*. Nothing may follow the end record.
+A manifest is *complete* iff its final line is a valid end record satisfying the
+requirements above. Nothing may follow an end record: material after one —
+parseable or not — makes the manifest *manifest-malformed* (§18) and the manifest
+is not complete; an end record seals only a manifest it terminates. Recovery
+treats such a manifest like any other malformed interrupted manifest (§12):
+parseable `message`/`tombstone` records are salvaged by re-emission, wherever
+they sit relative to the stray end record, but the manifest never reports
+*recovered* — and, being incomplete, none of its lines count as coverage for any
+other run.
 
 ## 9. Merkle commitment and the seal target
 
@@ -674,7 +698,13 @@ of the format, because "your archive is fine" and "your archive is fine but run
 first problem: every run and every object gets a status.
 
 **Record order.** The archive's record sequence is totally ordered: runs in chain
-order (§8.1), records in file order within a run. Per object, the latest `message` or
+order — the unique path of `prev_run` links walked forward from the genesis run —
+then records in file order within a run. Runs off that path (fork branches,
+manifests making no chain claim) follow the chained runs, ordered by run ULID
+among themselves: a best effort, since such an archive already reports damage.
+Run ULIDs normally coincide with chain order, but chain links, not timestamps,
+are authoritative — "later" in this spec (coverage, §12; latest-record
+resolution) always means later in this total order. Per object, the latest `message` or
 `tombstone` record determines its expected state — a message record expects presence,
 a tombstone expects absence, and a later observation reverses an earlier tombstone
 (re-ingest after deletion is legitimate). This rule is sound only because recovery
@@ -699,7 +729,7 @@ Per run:
 | dimension | statuses |
 |---|---|
 | completion | `complete` / `interrupted` / `recovered` (interrupted but covered, §12; a malformed manifest never reports recovered) |
-| chain | `chain-ok` / `chain-broken` (prev missing or `prev_sha256` mismatch) / `chain-fork` (a shared `prev_run`) |
+| chain | `chain-ok` / `chain-broken` (prev missing or `prev_sha256` mismatch) / `chain-fork` (run records sharing a `prev_run`) / not applicable (no parseable run record, §8.1) |
 | root | `root-ok` / `root-mismatch` (recomputed tree ≠ end record) / not applicable (interrupted) |
 | integrity | `manifest-malformed` (any unparseable non-trailing line; reported with line numbers) |
 | signature | `sig-ok` / `sig-unknown-key` (provenance unverifiable, not corruption) / `sig-invalid` / `sig-missing` |
