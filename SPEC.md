@@ -4,41 +4,71 @@
 freezes at v1.0; the logical-identity algorithm (§13) is versioned independently and is
 never frozen (see §13.1).
 
-The key words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted as
-described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD
+NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and "OPTIONAL" in this document are to
+be interpreted as described in BCP 14
+([RFC 2119](https://www.rfc-editor.org/rfc/rfc2119),
+[RFC 8174](https://www.rfc-editor.org/rfc/rfc8174)) when, and only when, they appear
+in all capitals.
 
-## 1. Goals
+## 1. Introduction
 
-Mail accumulates for decades across schools, jobs, domains, and providers, and every
-migration is a chance to lose attachments, botch a merge, or silently drop years of
-history. A mailpack archive is a folder of files built to end that: one place where a
-lifetime of mail from every source is consolidated, merged without double-counting,
-and still readable in thirty years with no mailpack software at all.
+Personal mail accumulates for decades across providers, employers, schools, and
+domains, and outlives every account that carries it. The incumbent storage formats
+each solve part of the problem. mbox concatenates messages into a single fragile file,
+with dialect-dependent escaping and no integrity protection. Maildir stores one file
+per message but has no cross-source identity, no provenance, and no integrity
+protection. PST is proprietary. Mail left on a server survives only as long as the
+account does. None of them can merge the same mailbox captured two ways without
+double-counting it.
 
-Concretely, the format:
+A mailpack archive is a directory of files with four properties that no incumbent
+format provides together:
 
-1. stores raw RFC 5322 messages content-addressed and deduplicated, without ever
-   rewriting a message — every payload is a `.eml` file inside a standard ZIP archive;
-2. distinguishes *byte identity* (storage) from *message identity* (what the user
-   thinks of as "one email"), so the same message captured from Takeout, IMAP, Graph,
-   and PST merges instead of multiplying;
-3. records provenance (which account, which folder, which capture run) in append-only
-   manifests;
-4. is evidence-grade as a property of the format: manifests form a hash chain
-   committed to by per-run Merkle roots, signed by the owner and independently
-   timestamped, so the archive's history can be verified by a stranger — within the
-   limits stated honestly in §2.
+1. **Consolidation without double-counting.** Messages are stored as raw RFC 5322
+   bytes, content-addressed, deduplicated, and never rewritten. Byte identity
+   (storage) is distinguished from logical identity (what the user regards as one
+   email), so the same message captured from IMAP, Takeout, Graph, and PST merges
+   instead of multiplying (§13).
+2. **Provenance.** Which account, which folder, which capture run — recorded in
+   append-only manifests (§8).
+3. **Tamper evidence.** Manifests form a hash chain committed to by per-run Merkle
+   roots, signed by the owner and independently timestamped (§9–§11). The archive's
+   history can be verified by a stranger, within the limits stated in §2.
+4. **Longevity.** Every payload is a `.eml` file inside a standard ZIP archive. An
+   archive remains readable with no mailpack software and no surviving
+   implementation: any ZIP tool opens a pack, and any mail client opens an entry.
 
-Evidence is a property the archive has, not a reason to install it. The reason to
-install it is consolidation, merge, and longevity in an open format.
+Tamper evidence is a structural property of the format, not its purpose; the purpose
+is consolidation, provenance, and longevity.
 
-Non-goals: encryption at rest (use full-disk encryption; the archive is plaintext for
-recoverability), multi-writer concurrency, compliance retention (17a-4/FINRA/MiFID).
+### 1.1 Non-goals
+
+The format deliberately does not provide:
+
+- **Encryption at rest.** The archive is plaintext for recoverability. Deployments
+  requiring confidentiality encrypt beneath the format (full-disk or volume
+  encryption).
+- **Multi-writer concurrency.** One writer at a time (§16). §8.1 reserves syntax for
+  a future multi-parent chain; this version defines no merge semantics.
+- **Sub-message deduplication.** Objects are whole messages: an attachment shared by
+  thirty messages is stored thirty times (§6). Deduplicating below the message is a
+  job for the storage layer holding the archive, not for the format.
+- **Source-state reconstruction.** Manifests record what a run observed, not what a
+  source contained. The format carries no completeness claims about any enumeration,
+  so "the mailbox as it stood at time T" is not derivable; §2 states why such claims
+  are excluded.
+- **Synchronization.** An archive is a directory; it replicates with any file-copy
+  tool. The format defines no wire protocol and no conflict resolution.
+- **Compliance retention** (SEC 17a-4, FINRA, MiFID II) and similar regulatory
+  regimes.
+- **Live mail storage.** The archive is written by capture and maintenance runs, not
+  by a mail client's hot path.
 
 ## 2. Threat model
 
-What the evidence machinery proves, and what it does not. Verify tooling MUST NOT use
-output language that overstates any of this.
+This section states what the evidence machinery proves and what it does not. Verify
+tooling MUST NOT use output language that overstates any of it.
 
 **Signatures are owner attestation.** An Ed25519 signature (§10) proves the holder of
 the signing key attested to a run's records. It detects tampering by anyone who does
@@ -64,17 +94,34 @@ is free — but re-anchoring is not: the original timestamps cannot be reproduce
 rewritten history's only anchors postdate the edit. An archive whose every anchor is
 younger than the events it claims is exactly what tampered history looks like.
 
-**The honest limit: tail truncation.** Anchoring is transitive backwards only; there
-are no forward pointers. Deleting the newest runs deletes their anchors with them and
-leaves a shorter archive that verifies cleanly. Truncation is undetectable unless the
-verifier knows the expected chain head out of band. No mitigation is claimed beyond
-out-of-band head knowledge (e.g. the owner publishing or depositing the latest run
-ULID + manifest hash elsewhere).
+**Tail truncation.** Anchoring is transitive backwards only; there are no forward
+pointers. Deleting the newest runs deletes their anchors with them and leaves a
+shorter archive that verifies cleanly. Truncation is therefore undetectable from
+archive contents alone; detection requires out-of-band knowledge of the expected
+chain head. The format supplies that head in a compact, disclosure-free form — the
+32-byte `SHA-256(E)` of the latest end record (§9) — which the owner can publish,
+deposit with any independent party, or have counter-signed. A receipt for that value
+held outside the archive makes truncation past it detectable by anyone holding the
+receipt. Absent such a deposit, truncation is undetectable.
 
-**DKIM evidence is a recorded claim.** A `dkim` record (§8.4) stores the DNS TXT key
-record the owner's software says it retrieved at time T. Anchoring makes that claim
-tamper-evident afterwards; it does not make it true. Its value is corroboration: keys
-recorded independently by other archives or observers can agree with it.
+**Witness records are recorded retrievals.** A witness record (§8.4) preserves an
+external artifact — a DKIM key record, for example — that the owner's software states
+it retrieved at a stated time. Anchoring makes the statement tamper-evident
+afterwards; it does not make the retrieval honest. Each record therefore carries its
+provenance: `proven` when captured trust-chain material lets a verifier establish,
+from the archive alone, that the artifact came from its claimed source; `asserted`
+when nothing but the owner's word places it there. Asserted artifacts gain value
+through corroboration — the same artifact recorded independently by other archives or
+observers — and MUST NOT be presented as proven. In every case the record's stated
+result is recomputable from stored bytes (§8.4), so the artifact's provenance is the
+only trust surface.
+
+**Claims must be checkable.** Manifest records document what the owner's software did
+— runs, observations, deletions — or preserve external perishable artifacts that
+cannot be re-fetched later (witness records). The format records no self-assessments:
+a claim such as "this folder was enumerated completely" preserves nothing a stranger
+can check, and its permanence would add trust surface without adding evidence. Record
+types that fail this test are excluded by design.
 
 ## 3. Terminology
 
@@ -97,6 +144,9 @@ recorded independently by other archives or observers can agree with it.
   Governs message counts, merge, search, and UI. One logical message may have many
   byte variants.
 - **Tombstone** — a manifest record documenting deliberate deletion of an object.
+- **Witness record** — a manifest record preserving an external, perishable artifact
+  that corroborates something about an archived message, together with a recomputable
+  check result (§8.4).
 - **Recovery run** — a run that re-emits an interrupted manifest's parseable records
   verbatim so they regain a sealed, anchorable home (§12).
 
@@ -162,8 +212,8 @@ spec).
 
 ## 5. Objects and staging
 
-An object is the raw captured bytes of one message. Objects are immutable: no
-implementation may ever alter the bytes of a stored object.
+An object is the raw captured bytes of one message. Objects are immutable: an
+implementation MUST NOT alter the bytes of a stored object.
 
 - Object ID = SHA-256 of the raw bytes, lowercase hex.
 - A newly ingested object is written either to `packs/staging/<sha256>.eml` or
@@ -177,8 +227,8 @@ implementation may ever alter the bytes of a stored object.
   between sealing and staging cleanup can leave one — and treat any copy as
   equivalent.
 
-The `.eml` extension is cosmetic but REQUIRED: it makes extracted files open in mail
-clients, at no cost.
+The `.eml` extension carries no semantics but is REQUIRED: extracted files open
+directly in mail clients.
 
 ## 6. Packs
 
@@ -194,7 +244,8 @@ Requirements:
   `^[0-9a-f]{64}\.eml$` — this reserves room for future pack-level metadata entries
   without breaking old readers.
 - Entry contents: the object's raw bytes. The entry name's hash MUST equal the SHA-256
-  of the uncompressed entry data.
+  of the uncompressed entry data. The ZIP CRC-32 is not a substitute for this
+  comparison; implementations MUST NOT rely on it.
 - Compression: writers SHOULD use DEFLATE; STORE is permitted. Readers MUST support
   both. No other methods, no encryption, no split/spanned archives.
 - Writers SHOULD order entries by ascending hash when the full entry set is known
@@ -202,16 +253,23 @@ Requirements:
   produce identical entry order. A streaming bulk writer MAY write entries in arrival
   order.
 - Writers SHOULD seal packs in the 256 MiB – 1 GiB range. This is a target, not a
-  conformance bound.
+  conformance bound, and it assumes an archive on local storage; a continuously
+  replicated archive may prefer smaller packs, because a deletion rewrite (§17)
+  rewrites — and re-transfers — whole packs.
 
 Sealing MUST be crash-safe: build the pack at a `.tmp-` name, verify it by reading
 back every entry and recomputing its hash, sync it durably, rename it into place,
 sync the parent directory, and only then remove any sealed objects from staging.
 
-Rationale for ZIP64 packs (informative): loose small files can be pathologically slow
-under synchronous scanning; packs collapse a million paths to a few hundred; the
-central directory doubles as a pack index; and recovery without mailpack software
-is "double-click the pack".
+Rationale (informative): loose small files are pathologically slow under synchronous
+per-file scanning; packs collapse a million paths to a few hundred; the central
+directory doubles as a pack index; and a pack is recoverable with any ZIP tool, no
+mailpack software required. The cost of storing whole messages is the absence of
+sub-message deduplication: an attachment shared across a reply chain is stored once
+per distinct message, and per-entry compression cannot recover redundancy between
+entries. This is accepted (§1.1); a storage layer holding packs can recover it below
+the format (block-level or content-defined deduplication) without touching the
+archive.
 
 ## 7. Object location
 
@@ -253,6 +311,7 @@ The first line of every manifest MUST be a `run` record:
  "archive_id": "01J8ZQ5X7E9RVN3TCK4WDBGHMA",
  "prev_run": "01J8ZQ4A2M6PWX8YB0CDEFGHJK",
  "prev_sha256": "b5bb9d8014a0f9b1d61e21e796d78dccdf1352f23cd32812f4850b878ae4944c",
+ "keys_sha256": "486ea46224d1bb4fb680f34f7c9ad96a8f24ec88be73ea8e5a6c65260e9cb8a7",
  "started": "2026-08-15T01:02:03Z", "source": "imap:alice@example.com",
  "kind": "ingest"}
 ```
@@ -262,9 +321,28 @@ The first line of every manifest MUST be a `run` record:
 - `archive_id` — the archive's ULID (§4.1); binds the run to its archive.
 - `prev_run` / `prev_sha256` — the chain link: the preceding run's ULID and the
   lowercase-hex SHA-256 of that run's manifest file — its exact bytes at link time,
-  whether complete or interrupted. Both `null` on the archive's first run.
+  whether complete or interrupted. Both `null` on the archive's first run. Both
+  fields are scalars in this version: writers MUST emit a single ULID and a single
+  hash. A future minor version may define array-valued links (a run with several
+  predecessors); a reader encountering an array MUST treat the manifest as written
+  by an unsupported future version, not as malformed. Such a manifest's chain
+  position is uninterpretable by this version: its chain status is *not applicable*
+  (§18), it takes no part in fork detection, and — the chain tip being
+  undeterminable — a writer MUST refuse to append, the same refusal required below
+  when the chain tip cannot be determined.
+- `keys_sha256` — lowercase-hex SHA-256 of the exact bytes of `meta/keys.json` as
+  the run began, or `null` if the file did not exist. REQUIRED. Binds the registry
+  state into the anchored history (§10.2).
 - `started` — RFC 3339 UTC.
-- `source` — an opaque source identifier; `null` for maintenance runs.
+- `source` — an opaque source identifier, or `null` for a run that observes no
+  source (`maintenance`, `delete`, and `recovery` runs). A run observes at most one
+  source: every message record a run emits first-hand is an observation from that
+  run's `source`. A record re-emitted by recovery (§12) keeps its original
+  attribution: its source is found by following `recovers` links back to the first
+  run that is not a recovery run. If that walk fails — some manifest along it has no
+  parseable run record — the record's source is *unknown*: it still participates in
+  presence/absence resolution (§18) but not in per-source resolution. This
+  attribution rule is what makes per-source resolution well defined.
 - `kind` — `"ingest"`, `"delete"`, `"maintenance"`, or `"recovery"`. A recovery run
   additionally carries `"recovers": "<run-ulid>"`, the interrupted run it re-emits
   (§12).
@@ -306,14 +384,17 @@ One per message observed by the run:
 - `sha256` — byte identity (§5). REQUIRED.
 - `size` — object size in bytes. REQUIRED.
 - `logical_id`, `identity_v` — logical identity and the algorithm version that produced
-  it (§13). REQUIRED. `identity_v: 0` with `logical_id: null` means "not computed"
-  (e.g. the message failed to parse; archival is never blocked by parsing).
+  it (§13; a manifest records the identity computed at write time — see §13.1).
+  REQUIRED. `identity_v: 0` with `logical_id: null` means "not computed" (e.g. the
+  message failed to parse; archival is never blocked by parsing).
 - `provider_id` — provider-native message ID (e.g. Gmail `X-GM-MSGID`, IMAP UID
-  qualified by UIDVALIDITY, Graph message id), or `null`. Format is source-specific and
-  opaque.
-- `folders` — folder/label names as reported by the source. MAY be empty.
-- `date` — the message's internal date as reported by the source, RFC 3339 UTC, or
-  `null`.
+  qualified by UIDVALIDITY, Graph message id), or `null`. Format is source-specific
+  and opaque; the value is meaningful only relative to the record's source (§8.1).
+- `folders` — folder/label names as reported by the source. MAY be empty. Resolved
+  per source (§18).
+- `date` — the message's internal date as reported by the source (e.g. IMAP
+  `INTERNALDATE`), RFC 3339 UTC, or `null`. This is the source's storage timestamp,
+  not the message's `Date:` header — §13.2 reads the latter from the message bytes.
 - `ingested` — when this run stored/observed the object, RFC 3339 UTC. REQUIRED.
 
 The same object MAY appear in message records of many runs (a re-sync observes it
@@ -339,47 +420,96 @@ Documents deliberate deletion (§17):
 A tombstone asserts: this object once existed, and its absence is deliberate.
 Verifiers use it to distinguish *excised* from *missing* (§18).
 
-### 8.4 `dkim` record
+### 8.4 `witness` record
 
-Documents one DKIM verification attempt against an archived message. Written only
-when a DNS key record was actually retrieved — the key is the durable artifact, and it
+Mail carries corroborating material whose later verification depends on external,
+perishable artifacts: DKIM keys rotate out of DNS, certificate chains expire, key
+servers disappear. A witness record preserves such an artifact at the moment it can
+still be retrieved, together with the result of checking an archived message against
+it. The artifact is the evidence; the anchored manifest fixes when it was captured
+(§2).
+
+Witness records share a common core; protocol-specific fields are selected by a
+`protocol` discriminator. This version registers one protocol: `dkim` (§8.4.1).
+Future protocols (§20) are added by registering a new discriminator value and its
+fields — the common core is never revised. Readers MUST skip witness records whose
+`protocol` they do not implement, and verifiers MUST report them as unrecognized
+rather than as damage: the forward-compatibility rule §8 applies to unknown record
+types extends to unknown protocols within this one.
+
+Common fields, all REQUIRED:
+
+- `sha256` — the checked object.
+- `protocol` — the registered protocol identifier.
+- `artifact` — the retrieved artifact in its original retrieved form, base64
+  (RFC 4648, with padding). The raw bytes are the durable evidence; any parsed
+  rendering of them is a per-protocol convenience.
+- `trust_chain` — material chaining the artifact to a trust root independent of the
+  owner, in its retrieved form, base64; `null` when none was captured. The chain is
+  exactly as perishable as the artifact and cannot be fetched retroactively; writers
+  SHOULD capture it whenever the retrieval path offers it.
+- `provenance` — `"proven"` or `"asserted"`. `"proven"` REQUIRES a `trust_chain`
+  from which a verifier can establish, offline, that the artifact came from its
+  claimed source. Anything less is `"asserted"`: the owner's software states that it
+  retrieved these bytes, and nothing in the archive can prove it (§2). Provenance is
+  a property of each observation, not of a protocol.
+- `result` — the protocol-defined check result.
+- `checked` — retrieval and check time, RFC 3339 UTC.
+
+Recomputability is the family's defining requirement: every registered protocol MUST
+define `result` so that a verifier holding nothing but the archive can recompute it
+from the stored artifact and the message bytes — and disagree with the record. The
+stated result is never part of the trust surface; the artifact's provenance is the
+whole of it.
+
+Witness records are observations, not state. They accumulate; nothing supersedes an
+earlier record, and a later failure does not erase an earlier anchored success —
+artifact rotation and transport mangling make later failures expected for honest
+messages.
+
+#### 8.4.1 Protocol: `dkim`
+
+One record per DKIM verification attempt against an archived message, written only
+when a DNS key record was actually retrieved. The key is the perishable artifact; it
 is stored even when verification failed.
 
 ```json
-{"type": "dkim",
+{"type": "witness", "protocol": "dkim",
  "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+ "artifact": "<base64 of: v=DKIM1; k=rsa; p=MIIBIjANBgkq…>",
+ "trust_chain": null,
+ "provenance": "asserted",
+ "result": "pass",
+ "checked": "2026-08-15T01:02:05Z",
  "domain": "example.com",
  "selector": "s1",
  "from_domain": "example.com",
  "aligned": "strict",
- "body_length": null,
- "result": "pass",
- "key_record": "v=DKIM1; k=rsa; p=MIIBIjANBgkq…",
- "checked": "2026-08-15T01:02:05Z"}
+ "body_length": null}
 ```
 
-- `sha256` — the verified object. REQUIRED.
+- `artifact` — the DKIM key record: the RDATA of the TXT record at
+  `<selector>._domainkey.<domain>`, with its character-strings concatenated
+  (RFC 6376 §3.6.2.2).
+- `trust_chain` — DNSSEC validation material sufficient to validate that TXT RRset
+  up to the root zone trust anchor, DNS wire format, or `null`. [DRAFT: the exact
+  serialization is unresolved (§20).] `provenance: "proven"` REQUIRES such a chain;
+  an unvalidated retrieval is `"asserted"`.
+- `result` — `"pass"` or `"fail"`: RFC 6376 verification of the message's signature
+  against the key in `artifact`. Recomputable per §8.4.
 - `domain`, `selector` — the signature's `d=` and `s=`. REQUIRED.
 - `from_domain` — the domain of the first `From` mailbox at check time. REQUIRED.
 - `aligned` — `"strict"`, `"relaxed"`, or `"none"`: the alignment judgment between
-  `domain` and `from_domain`, computed at ingest time. The raw `from_domain` is
+  `domain` and `from_domain`, computed at check time. The raw `from_domain` is
   stored alongside the judgment because relaxed alignment depends on the public
   suffix list, which drifts; a bare stored boolean would rot. REQUIRED.
 - `body_length` — the signature's raw `l=` value, or `null` when absent. REQUIRED.
-- `result` — `"pass"` or `"fail"`. REQUIRED.
-- `key_record` — the DNS TXT record retrieved for `<selector>._domainkey.<domain>`.
-  REQUIRED.
-- `checked` — RFC 3339 UTC. REQUIRED.
-
-Resolution rule: `dkim` records are observations, not state. They accumulate; nothing
-supersedes an earlier record, and a later `fail` never erases an earlier anchored
-`pass` — key rotation and transport mangling make later failures expected for honest
-messages.
 
 Display requirements (normative for tools rendering these records): a pass whose
-`aligned` is `"none"` MUST NOT be rendered as verification of the sender; a pass with
-a non-null `body_length` MUST NOT be rendered as verification of the full message
-content. See §2: none of this is authenticity, and output language must not imply it.
+`aligned` is `"none"` MUST NOT be rendered as verification of the sender; a pass
+with a non-null `body_length` MUST NOT be rendered as verification of the full
+message content; an `"asserted"` record MUST NOT be rendered as if the artifact's
+origin were proven (§2).
 
 ### 8.5 `end` record
 
@@ -402,12 +532,12 @@ The last line of a complete manifest:
 - `root` — the run's Merkle root (§9). REQUIRED.
 
 A manifest is *complete* iff its final line is a valid end record satisfying the
-requirements above. Nothing may follow an end record: material after one —
+requirements above. Nothing follows an end record: material after one —
 parseable or not — makes the manifest *manifest-malformed* (§18) and the manifest
 is not complete; an end record seals only a manifest it terminates. Recovery
 treats such a manifest like any other malformed interrupted manifest (§12):
-parseable `message`/`tombstone` records are salvaged by re-emission, wherever
-they sit relative to the stray end record, but the manifest never reports
+parseable records are salvaged by re-emission, wherever they sit relative to the
+stray end record, but the manifest never reports
 *recovered* — and, being incomplete, none of its lines count as coverage for any
 other run.
 
@@ -476,8 +606,8 @@ Interrupted manifests have no end record and therefore no signature; their recor
 regain a signable home through recovery (§12).
 
 The signature detects corruption and tampering. It does **not** prove time — that is
-the anchors' job (§11) — and neither proves authenticity (§2). Docs built on this
-spec should say so plainly.
+the anchors' job (§11) — and neither proves authenticity (§2). Documentation built on
+this spec should state both limits plainly.
 
 ### 10.2 Key registry and lifecycle
 
@@ -493,25 +623,38 @@ spec should say so plainly.
 ]}
 ```
 
-Keys are a lifecycle, not a constant: over decades users lose keys and change machines.
+Keys have a lifecycle: over decades, users lose keys and change machines.
 
 - Multiple keys MAY be trusted concurrently.
 - Rotation: add the new key, mark the old one `retired` (RFC 3339). Retired keys still
   verify old manifests; they SHOULD NOT sign new ones.
 - A lost key is not corruption. Verification reports runs signed by unknown keys as
   *provenance-unverifiable*, distinct from *corrupt* (§18).
-- Verifiers MAY be given a key set out-of-band instead of trusting `meta/keys.json`
-  (the registry travels with the archive, so a tamperer can rewrite it; out-of-band
-  fingerprint comparison is the stronger check and MUST be supported by verify
-  tooling).
+
+The registry is bound to the run chain: every run records `keys_sha256` (§8.1), the
+hash of `meta/keys.json` as the run began. Editing the registry therefore leaves a
+mark — the file no longer hashes to the newest run's recorded value — and concealing
+the edit requires appending a new run, whose anchors postdate it (§2). A transient
+mismatch immediately after rotation is expected; rotation tooling SHOULD finish by
+recording a maintenance run so the new registry state is promptly anchored. Verify
+tooling MUST report a registry whose bytes do not hash to the newest run's
+`keys_sha256`.
+
+The binding does not let a verifier reconstruct historical registry contents from
+hashes alone, and it does not defeat an attacker who extends the chain with runs
+signed by keys they inserted. Out-of-band fingerprint comparison remains the stronger
+check: verify tooling MUST support being given a key set out-of-band in place of
+`meta/keys.json`.
 
 ## 11. Timestamps and anchoring
 
 Two anchor mechanisms, because they fail in opposite directions:
 
 - `manifests/<run-ulid>.tsr` — one or more RFC 3161 `TimeStampResp` structures, DER,
-  concatenated. Each MUST cover `SHA-256(E)` (§9). Writers SHOULD obtain tokens from
-  ≥ 2 independent TSAs — no single authority may be the point of trust.
+  concatenated. Readers parse the file sequentially: each structure is a DER
+  SEQUENCE whose encoded length delimits it, and the next begins at the following
+  byte. Each MUST cover `SHA-256(E)` (§9). Writers SHOULD obtain tokens from ≥ 2
+  independent TSAs — no single authority may be the point of trust.
 - `manifests/<run-ulid>.ots` — an OpenTimestamps proof over the same hash.
   Bitcoin-anchored; needs no surviving authority. Proofs start incomplete and MUST be
   upgraded once attestations confirm; tooling runs the upgrade pass in the background.
@@ -538,10 +681,13 @@ An interrupted manifest (§8.5) is never resumed or edited. Its parseable record
 instead *re-emitted* by a recovery run:
 
 - `kind: "recovery"`, with `recovers` naming the interrupted run (§8.1).
-- The recovery run appends every parseable `message` and `tombstone` line of the
-  interrupted manifest **verbatim** — byte-identical lines, original `ingested`
-  timestamps included — then finishes normally, gaining its own end record, root,
-  signature, and anchors.
+- The recovery run appends every parseable record line of the interrupted manifest
+  whose `type` is neither `run` nor `end` **verbatim** — byte-identical lines,
+  original timestamps included, record types the recovering writer does not itself
+  understand included (verbatim bytes require no understanding) — then finishes
+  normally, gaining its own end record, root, signature, and anchors. `run` and
+  `end` lines are excluded because each may appear only at its own manifest's edge
+  (§8.1, §8.5); everything between the edges is salvage.
 - A trailing LF-less partial line in the interrupted manifest is not a record and is
   not re-emitted. A mid-file unparseable line is damage, not interruption: the
   manifest is *manifest-malformed* (§18), permanently. Recovery still applies to its
@@ -563,9 +709,9 @@ A recovery run is an ordinary run: it can itself be interrupted, and is then
 covered or re-emitted under exactly these rules — re-emission of a re-emission is
 still byte-identical to the original records, so coverage converges.
 
-An interrupted run is *covered* when every parseable `message`/`tombstone` line in it
-appears byte-identically in some later complete run (vacuously true when it has no
-such records). Verification reports a covered interrupted run as *recovered* (§18) —
+An interrupted run is *covered* when every parseable record line in it whose `type`
+is neither `run` nor `end` appears byte-identically in some later complete run
+(vacuously true when it has no such records). Verification reports a covered interrupted run as *recovered* (§18) —
 transient in effect, while the crash artifact stays honestly visible forever —
 unless it is also manifest-malformed, in which case it stays *interrupted*.
 
@@ -597,33 +743,68 @@ in [`vectors/`](vectors/). Fixes and improvements ship as a new version — neve
 silent change to an existing one. Old manifests keep their old `identity_v`; nothing is
 rewritten.
 
+A manifest's `logical_id` is therefore a capture-time claim: it records what the
+then-current algorithm computed, reproducibly checkable by anyone holding the bytes.
+Identity under the *current* version is derived state and lives in the index (§14).
+After the algorithm advances, implementations MUST NOT treat older manifests'
+`logical_id` values as current-version identity.
+
 ### 13.2 Algorithm v1 [DRAFT — test vectors pending; do not implement as final]
 
 Inputs: the raw object bytes, parsed as RFC 5322.
 
-1. **message-id**: the `Message-ID` header value with surrounding whitespace and one
-   pair of enclosing angle brackets removed. Absent or unparseable → empty string.
-2. **date**: the `Date` header parsed per RFC 5322, converted to Unix seconds (UTC),
-   rendered as a decimal integer. Absent or unparseable → empty string.
-3. **from**: the addr-spec of the first mailbox in `From`, lowercased. Absent or
-   unparseable → empty string.
-4. **body-hash**: lowercase hex SHA-256 of the canonicalised body: decode the
-   transfer encoding of the first `text/*` leaf part (or the raw body if unstructured),
-   normalise line endings to LF, strip trailing whitespace from each line, strip
-   trailing empty lines. [DRAFT: charset handling, multipart selection, and
-   HTML-vs-plain preference are unresolved — this is exactly the empirical work the
-   version number exists for.]
+Identity is tiered: a message bearing a Message-ID is identified by it; a message
+without one falls back to content features. A single digest over many fields would
+require exact agreement on every one, and the capture paths that motivate logical
+identity (§13) are precisely those that perturb dates, encodings, and bodies; a
+missed merge silently double-counts, which is the failure the format exists to
+prevent. The tier is a function of the message bytes alone — implementations
+recompute it, and it is not recorded in manifests.
 
-Then each input is framed by its length — an unambiguous encoding regardless of field
+Fields:
+
+1. **message-id**: the `Message-ID` header value with surrounding whitespace and one
+   pair of enclosing angle brackets removed. Absent or unparseable → the message has
+   no message-id and identity uses tier 2.
+2. **from**: the addr-spec of the first mailbox in `From`, lowercased. Absent or
+   unparseable → empty string.
+3. **date**: the `Date` header parsed per RFC 5322, converted to Unix seconds (UTC),
+   rendered as a decimal integer. Absent or unparseable → empty string. (This is the
+   message's own header, not the source-reported `date` of §8.2.)
+4. **body-hash**: lowercase hex SHA-256 of the canonicalised body: decode the
+   transfer encoding of the first `text/*` leaf part (or the raw body if
+   unstructured), normalise line endings to LF, strip trailing whitespace from each
+   line, strip trailing empty lines. [DRAFT: charset handling, multipart selection,
+   and HTML-vs-plain preference are unresolved — this is exactly the empirical work
+   the version number exists for.]
+
+Each input is framed by its length — an unambiguous encoding regardless of field
 contents:
 
 ```
-frame(x)   = len(x) as 8-byte big-endian ‖ x
-logical_id = sha256(frame("mailpack-identity-v1") ‖ frame(message-id) ‖
-                    frame(date) ‖ frame(from) ‖ frame(body-hash))
+frame(x) = len(x) as 8-byte big-endian ‖ x
 ```
 
-rendered as lowercase hex.
+Tier 1 — message-id present:
+
+```
+logical_id = sha256(frame("mailpack-identity-v1-t1") ‖ frame(message-id) ‖ frame(from))
+```
+
+Tier 2 — message-id absent:
+
+```
+logical_id = sha256(frame("mailpack-identity-v1-t2") ‖ frame(date) ‖ frame(from) ‖
+                    frame(body-hash))
+```
+
+rendered as lowercase hex. Two messages are the same logical message iff their
+`logical_id`s are equal; the distinct context strings keep the tiers disjoint.
+
+[DRAFT: tier 1's exposure is over-merge — Message-IDs duplicated across genuinely
+distinct messages by drafts, resends, and defective generators. Over-merge loses no
+data: identity never alters stored bytes, and a later identity version can split
+what v1 joined. Its real frequency is an empirical question for the corpus.]
 
 Correctness of a version is defined against the labeled ground-truth corpus in
 [`corpus/`](corpus/), not against intuition.
@@ -663,7 +844,7 @@ reads: search, the GUI, verification, disclosure.
   rescan, then retry.
 - **Windows delete-retry.** Deleting a file another process has open fails on
   Windows. Deleters MUST retry such deletions; sweepable leftovers (`.tmp-`, an
-  already-replaced pack) may also be cleaned by a later lock holder.
+  already-replaced pack) MAY also be cleaned by a later lock holder.
 - **NFS caveat.** Advisory locking is unreliable on network filesystems. An archive
   on NFS/SMB gets no single-writer guarantee from this spec; keep archives on local
   disks and replicate instead.
@@ -710,12 +891,22 @@ a tombstone expects absence, and a later observation reverses an earlier tombsto
 (re-ingest after deletion is legitimate). This rule is sound only because recovery
 precedes any new run (§12): re-emitted records can never leapfrog a later tombstone.
 
+**Per-source resolution.** Presence and absence resolve across all sources, as
+above. Descriptive fields resolve per source. A record's source is determined by
+the attribution rule of §8.1: the emitting run's `source`, followed through
+`recovers` links for re-emitted records; records whose attribution walk fails have
+unknown source and take no part in this rule. Per object and per source, the latest message
+record's `folders` and `provider_id` are current for that source; earlier records
+are history. Sources are never collapsed: an object simultaneously in `INBOX` at one
+source and `Archive` at another has both, and a conformant reader reports them per
+source.
+
 Per object (union of all records vs. what exists):
 
 | status | meaning |
 |---|---|
-| `ok` | expected present; bytes present and hash to the recorded ID |
-| `corrupt` | expected present; bytes present but do NOT hash to the recorded ID |
+| `ok` | expected present; bytes present, matching the recorded size and hashing to the recorded ID |
+| `corrupt` | expected present; bytes present but the recorded size or ID does not match |
 | `missing` | expected present; absent — data loss |
 | `excised` | expected absent (tombstoned); absent |
 | `zombie` | expected absent (tombstoned); still present — deletion incomplete, re-runnable |
@@ -729,11 +920,16 @@ Per run:
 | dimension | statuses |
 |---|---|
 | completion | `complete` / `interrupted` / `recovered` (interrupted but covered, §12; a malformed manifest never reports recovered) |
-| chain | `chain-ok` / `chain-broken` (prev missing or `prev_sha256` mismatch) / `chain-fork` (run records sharing a `prev_run`) / not applicable (no parseable run record, §8.1) |
+| chain | `chain-ok` / `chain-broken` (prev missing or `prev_sha256` mismatch) / `chain-fork` (run records sharing a `prev_run`) / not applicable (no parseable run record, or an array-valued chain link from an unsupported future version; §8.1) |
 | root | `root-ok` / `root-mismatch` (recomputed tree ≠ end record) / not applicable (interrupted) |
 | integrity | `manifest-malformed` (any unparseable non-trailing line; reported with line numbers) |
 | signature | `sig-ok` / `sig-unknown-key` (provenance unverifiable, not corruption) / `sig-invalid` / `sig-missing` / not applicable (interrupted — no end record to sign, §10.1) |
 | anchors | `ts-ok` / `ts-pending` (OTS awaiting upgrade) / `ts-missing` / `ts-invalid` (a present token fails verification or does not cover `SHA-256(E)`; per token, the run reports the worst) |
+
+Witness records (§8.4) never affect the statuses above. A verifier MAY recompute
+their results from stored artifacts and message bytes; if it does, it MUST report
+disagreements, alongside each record's `provenance`. Witness records with
+unrecognized protocols are reported as unrecognized, never as damage.
 
 An archive is **intact** iff no object is `corrupt` or `missing` and no run is
 `sig-invalid`, `ts-invalid`, `chain-broken`, `chain-fork`, `root-mismatch`, or
@@ -755,15 +951,28 @@ reported warning, never conflated with damage.
 - An **identity implementation** MUST match the published test vectors bit-exactly for
   every `identity_v` it claims.
 - A **verifier** MUST implement §18 and MUST NOT require `index/` or network access
-  (anchor verification MAY use the network; everything else works offline).
+  (anchor verification MAY use the network; everything else works offline). A
+  verifier MUST NOT decompress an entry beyond the size its object's records claim:
+  output exceeding the recorded `size` already fails the size check (`corrupt`,
+  §18), and unbounded decompression would let a hostile pack exhaust the verifier
+  through the very read-back path verification requires. Entries referenced by no
+  record are identified as `unattested` by entry name alone and need not be
+  decompressed at all.
 
 The conformance corpus lives in [`corpus/`](corpus/); identity test vectors in
 [`vectors/`](vectors/). Both are versioned with this spec.
 
 ## 20. Open questions (tracked toward v1.0)
 
-- Identity v1 body canonicalisation (§13.2) — needs the ground-truth corpus first.
+- Identity v1 body canonicalisation and tier-1 over-merge frequency (§13.2) — both
+  need the ground-truth corpus first.
+- The `trust_chain` serialization for protocol `dkim` (§8.4.1).
+- Witness protocol registrations beyond `dkim` — ARC chains, S/MIME certificate
+  validation material, OpenPGP keys — additive under §8.4.
 - Maximum manifest size / manifest splitting for very large runs — which would also
   cap recovery's re-emission cost when a huge run is interrupted (§12).
 - The stdlib-only recovery reader ships with this repo before v1.0 — and MUST surface
   staging objects (§19).
+- Export tooling (Maildir/mbox). Deliberately outside conformance: longevity is a
+  structural property of ZIP + `.eml`, and an exporter is a tool, not a format
+  obligation.
