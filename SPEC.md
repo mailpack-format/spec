@@ -246,7 +246,7 @@ Reader rules:
 The first line of every manifest MUST be a `run` record:
 
 ```json
-{"type": "run", "run": "01J8ZQ5X7E9RVN3TCK4WDBGHMA", "format_version": "0.1",
+{"type": "run", "run": "01J8ZQ6C3H2K9P4D8W1M5XETRV", "format_version": "0.1",
  "archive_id": "01J8ZQ5X7E9RVN3TCK4WDBGHMA",
  "prev_run": "01J8ZQ4A2M6PWX8YB0CDEFGHJK",
  "prev_sha256": "b5bb9d8014a0f9b1d61e21e796d78dccdf1352f23cd32812f4850b878ae4944c",
@@ -369,11 +369,17 @@ content. See §2: none of this is authenticity, and output language must not imp
 The last line of a complete manifest:
 
 ```json
-{"type": "end", "finished": "2026-08-15T01:07:00Z",
+{"type": "end", "run": "01J8ZQ6C3H2K9P4D8W1M5XETRV",
+ "archive_id": "01J8ZQ5X7E9RVN3TCK4WDBGHMA",
+ "finished": "2026-08-15T01:07:00Z",
  "messages": 2412, "tombstones": 0,
  "root": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"}
 ```
 
+- `run`, `archive_id` — MUST equal the run record's values. The end record is
+  the seal target (§9) and travels alone in disclosure bundles, so it must
+  identify the run and archive it seals by itself; a mismatch is
+  *manifest-malformed* (§18). REQUIRED.
 - `finished` — RFC 3339 UTC. REQUIRED.
 - `messages`, `tombstones` — counts of those record types in this manifest. REQUIRED.
 - `root` — the run's Merkle root (§9). REQUIRED.
@@ -387,8 +393,8 @@ Every complete run commits to its records with a Merkle tree in the
 [RFC 6962](https://www.rfc-editor.org/rfc/rfc6962#section-2.1) shape:
 
 - leaf hash = `SHA-256(0x00 ‖ leaf)`; interior node = `SHA-256(0x01 ‖ left ‖ right)`.
-- For n > 1 leaves the tree splits after the largest power of two smaller than n; the
-  root of zero leaves is `SHA-256("")`.
+- For n > 1 leaves the tree splits after the largest power of two smaller than n. (The
+  tree is never empty: the run record is always a leaf.)
 - The leaves are every line of the manifest **except the end record**, in file order,
   each without its trailing LF.
 
@@ -413,15 +419,16 @@ A disclosure bundle consists of:
 1. the record line (leaf bytes),
 2. its leaf index and the tree size (leaf count),
 3. the Merkle audit path (RFC 6962 §2.1.1),
-4. the end-record line E,
-5. the run ULID,
-6. the signature envelope (§10.1),
-7. any timestamp tokens (§11).
+4. the end-record line E — which itself names the run and archive (§8.5),
+5. the signature envelope (§10.1),
+6. any timestamp tokens (§11).
 
-The recipient verifies: leaf + audit path → root; root equals the `root` in E; the
-signature over E verifies against the disclosed key (whose fingerprint the recipient
-checks out of band); the timestamp tokens cover `SHA-256(E)`. This proves the record
-was part of a run the owner sealed at or before the anchored time — subject to §2.
+The recipient verifies: leaf + audit path → root; root equals the `root` in E; E's
+`run` and `archive_id` name the run and archive being claimed; the signature over E
+verifies against the disclosed key (whose fingerprint the recipient checks out of
+band); the timestamp tokens cover `SHA-256(E)`. This proves the record was part of
+that run of that archive, sealed by the owner at or before the anchored time —
+subject to §2.
 
 ## 10. Signatures
 
@@ -513,16 +520,30 @@ instead *re-emitted* by a recovery run:
   signature, and anchors.
 - A trailing LF-less partial line in the interrupted manifest is not a record and is
   not re-emitted. A mid-file unparseable line is damage, not interruption: the
-  manifest is *manifest-malformed* (§18) and recovery does not apply to it.
+  manifest is *manifest-malformed* (§18), permanently. Recovery still applies to its
+  parseable records — salvage costs nothing and asserts nothing about the damaged
+  line — but a malformed manifest never reports *recovered*: coverage cannot speak
+  for lines nobody can parse.
 
-Writers MUST perform recovery for all uncovered interrupted manifests after acquiring
-the writer lock and before beginning any other run, so the exposure window is one
-crashed session, not open-ended.
+Writers MUST perform recovery for all uncovered interrupted manifests — malformed
+ones included — after acquiring the writer lock and before beginning any other run,
+and then proceed normally: nothing about a crash artifact, damaged or not, blocks
+new runs. Recovery-before-new-runs is a correctness precondition for §18's
+latest-record resolution, not hygiene: re-emitted message records land in a run
+later than the crash, so if any other run — a deletion, say — could interpose
+between crash and recovery, a re-emitted observation of a deliberately deleted
+object would become its latest record and flip *excised* to *missing*. Because
+every writer recovers first, under the same lock, no run can ever interpose.
+
+A recovery run is an ordinary run: it can itself be interrupted, and is then
+covered or re-emitted under exactly these rules — re-emission of a re-emission is
+still byte-identical to the original records, so coverage converges.
 
 An interrupted run is *covered* when every parseable `message`/`tombstone` line in it
 appears byte-identically in some later complete run (vacuously true when it has no
-such records). Verification reports a covered interrupted run as *recovered* (§18):
-transient in effect, while the crash artifact stays honestly visible forever.
+such records). Verification reports a covered interrupted run as *recovered* (§18) —
+transient in effect, while the crash artifact stays honestly visible forever —
+unless it is also manifest-malformed, in which case it stays *interrupted*.
 
 Loss bounds (informative): a staging writer makes object bytes durable before
 appending the record, so a crash costs at most one manifest line — the object
@@ -531,7 +552,10 @@ appends records only after its pack seals, so a crash mid-pack loses only the
 in-flight temp pack — never archived, re-readable from the local source via an import
 cursor (§15) — and a crash between seal and record-append leaves sealed objects
 `unattested` until resume re-records them. No durably-stored message ever loses
-bytes; attestation loss is bounded and self-heals.
+bytes; attestation loss is bounded and self-heals. Re-emission roughly doubles the
+interrupted manifest's record bytes; bulk runs checkpoint per pack roll, capping
+that at one checkpoint's records, so the case that amplifies is a single very large
+incremental run crashing near its end (see §20 on manifest splitting).
 
 ## 13. Logical identity
 
@@ -628,6 +652,9 @@ deliberate, recorded operation:
 1. Write a new manifest (run `kind: "delete"`) containing one tombstone record per
    deleted object; finish, sign, and anchor it like any other run. The record
    precedes the removal: bytes are destroyed only after their tombstones are durable.
+   The gate is exactly the tombstone run's durable completion — its end record
+   synced. Signing is local; anchoring is asynchronous per §11; deletion never
+   waits on an external service.
 2. For each pack containing a deleted object: write a replacement pack (new ULID)
    containing every entry except the deleted ones, verify the replacement by reading
    back every entry, rename it into place, then — and only then — delete the old pack
@@ -650,7 +677,8 @@ first problem: every run and every object gets a status.
 order (§8.1), records in file order within a run. Per object, the latest `message` or
 `tombstone` record determines its expected state — a message record expects presence,
 a tombstone expects absence, and a later observation reverses an earlier tombstone
-(re-ingest after deletion is legitimate).
+(re-ingest after deletion is legitimate). This rule is sound only because recovery
+precedes any new run (§12): re-emitted records can never leapfrog a later tombstone.
 
 Per object (union of all records vs. what exists):
 
@@ -670,18 +698,19 @@ Per run:
 
 | dimension | statuses |
 |---|---|
-| completion | `complete` / `interrupted` / `recovered` (interrupted but covered, §12) |
+| completion | `complete` / `interrupted` / `recovered` (interrupted but covered, §12; a malformed manifest never reports recovered) |
 | chain | `chain-ok` / `chain-broken` (prev missing or `prev_sha256` mismatch) / `chain-fork` (a shared `prev_run`) |
 | root | `root-ok` / `root-mismatch` (recomputed tree ≠ end record) / not applicable (interrupted) |
 | integrity | `manifest-malformed` (any unparseable non-trailing line; reported with line numbers) |
 | signature | `sig-ok` / `sig-unknown-key` (provenance unverifiable, not corruption) / `sig-invalid` / `sig-missing` |
-| anchors | `ts-ok` / `ts-pending` (OTS awaiting upgrade) / `ts-missing` |
+| anchors | `ts-ok` / `ts-pending` (OTS awaiting upgrade) / `ts-missing` / `ts-invalid` (a present token fails verification or does not cover `SHA-256(E)`; per token, the run reports the worst) |
 
 An archive is **intact** iff no object is `corrupt` or `missing` and no run is
-`sig-invalid`, `chain-broken`, `chain-fork`, `root-mismatch`, or `manifest-malformed`.
-Everything else — `interrupted`, `recovered`, `zombie`, `unattested`,
-`sig-unknown-key`, `sig-missing`, `ts-*` — is a reported warning, never conflated
-with damage.
+`sig-invalid`, `ts-invalid`, `chain-broken`, `chain-fork`, `root-mismatch`, or
+`manifest-malformed` — wrong evidence is worse than absent evidence, for anchors as
+for signatures. Everything else — `interrupted`, `recovered`, `zombie`,
+`unattested`, `sig-unknown-key`, `sig-missing`, `ts-pending`, `ts-missing` — is a
+reported warning, never conflated with damage.
 
 ## 19. Conformance
 
@@ -704,6 +733,7 @@ The conformance corpus lives in [`corpus/`](corpus/); identity test vectors in
 ## 20. Open questions (tracked toward v1.0)
 
 - Identity v1 body canonicalisation (§13.2) — needs the ground-truth corpus first.
-- Maximum manifest size / manifest splitting for very large runs.
+- Maximum manifest size / manifest splitting for very large runs — which would also
+  cap recovery's re-emission cost when a huge run is interrupted (§12).
 - The stdlib-only recovery reader ships with this repo before v1.0 — and MUST surface
   staging objects (§19).
