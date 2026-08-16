@@ -1,17 +1,17 @@
 # mailpack
 
-An open format for personal mail archives: content-addressed, deduplicated,
-signed-manifested, independently timestamped — and recoverable with no mailpack
-software at all.
+An open format for personal mail archives. A lifetime of mail — every school, job,
+domain, and provider — consolidated into one folder of plain files, merged without
+double-counting, and still readable in thirty years with no mailpack software at all.
 
-**[Read the spec →](SPEC.md)** (v0.1-draft)
+**[Read the spec →](SPEC.md)** (v0.1, draft)
 
 ## Why a format?
 
-Mailboxes accumulate for decades across schools, jobs, domains, and providers. Every
-migration is a chance to lose attachments, botch a merge, or silently drop years of
-history. Existing archivers store mail in opaque, app-private databases: the archive
-dies with the software, and nothing about it can be proven to a stranger.
+Mailboxes accumulate for decades, and every migration is a chance to lose
+attachments, botch a merge, or silently drop years of history. Existing archivers
+store mail in opaque, app-private databases: the archive dies with the software, and
+merging a fifteen-year-old export against a live mailbox double-counts everything.
 
 mailpack is the format layer those tools are missing:
 
@@ -21,11 +21,15 @@ mailpack is the format layer those tools are missing:
   rewrites a message.
 - **Two identities.** Byte identity for storage, versioned *logical* identity for
   "is this the same email?" — because Takeout, IMAP, Graph, and PST all emit different
-  bytes for the same message.
-- **Verifiable by a stranger.** Ed25519-signed manifests detect tampering; RFC 3161 and
-  OpenTimestamps proofs establish existence in time without trusting the archive owner.
-- **Honest deletion.** The owner can delete; every deletion leaves a signed tombstone,
-  so verification distinguishes "excised by owner" from "missing".
+  bytes for the same message. This is what makes multi-decade merge work.
+- **Evidence-grade, as a property.** Capture runs form a hash chain committed to by
+  per-run Merkle roots, signed by the owner and independently timestamped (RFC 3161 +
+  OpenTimestamps). Rewritten history is detectable; single records can be disclosed
+  and verified without revealing the rest; and the spec's threat model states the
+  limits as plainly as the guarantees.
+- **Honest deletion, honest crashes.** Deletion leaves signed tombstones; interrupted
+  runs stay visible forever and recover by re-emission, so verification distinguishes
+  "excised by owner" from "missing" and "crashed and recovered" from "tampered".
 
 ## This repository
 
@@ -45,7 +49,10 @@ versioned per-manifest-line (`identity_v`) and evolves by publishing new version
 test vectors, never by silent change.
 
 Reference implementation: [mailpack-format/core](https://github.com/mailpack-format/core)
-(Rust — the `mailpack-core` library and CLI).
+(Rust — the `mailpack-core` library and CLI). It currently covers layout, packs,
+chained + merkle-rooted manifests, sessions with crash recovery, concurrency, and
+verification; signing and timestamp anchoring are specified here but not yet
+implemented there.
 
 ## License
 
