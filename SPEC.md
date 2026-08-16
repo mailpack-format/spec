@@ -79,7 +79,7 @@ characters.
 }
 ```
 
-- `mailpack` — always the integer `1`; the fast sniff test.
+- `mailpack` — always the integer `1`.
 - `format_version` — the spec version the archive was created against.
 - `archive_id` — a ULID assigned at creation, stable for the archive's life.
 - `created` — RFC 3339 UTC timestamp.
@@ -127,10 +127,10 @@ Sealing MUST be crash-safe: build the pack at a temporary name, verify it by rea
 back every entry and recomputing its hash, sync it durably, rename it into place, and
 only then remove the sealed objects from staging.
 
-Rationale for ZIP64 packs (informative): loose small files are pathologically slow under
-Windows Defender's synchronous scanning; packs collapse a million paths to a few
-hundred; the central directory doubles as a pack index; and recovery without mailpack
-software is "double-click the pack".
+Rationale for ZIP64 packs (informative): loose small files can be pathologically slow 
+under synchronous scanning; packs collapse a million paths to a few hundred; the 
+central directory doubles as a pack index; and recovery without mailpack software 
+is "double-click the pack".
 
 ## 6. Object location
 
