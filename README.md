@@ -50,8 +50,9 @@ test vectors, never by silent change.
 
 Reference implementation: [mailpack-format/core](https://github.com/mailpack-format/core)
 (Rust — the `mailpack-core` library and CLI). It currently covers layout, packs,
-chained + merkle-rooted manifests, sessions with crash recovery, concurrency, and
-verification; signing and timestamp anchoring are specified here but not yet
+chained + merkle-rooted manifests, sessions with crash recovery, concurrency,
+verification, and signing (envelope §10.1, key registry §10.2, `sig-*`
+verification statuses); timestamp anchoring is specified here but not yet
 implemented there.
 
 ## License
