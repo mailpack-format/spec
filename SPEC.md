@@ -732,7 +732,7 @@ Per run:
 | chain | `chain-ok` / `chain-broken` (prev missing or `prev_sha256` mismatch) / `chain-fork` (run records sharing a `prev_run`) / not applicable (no parseable run record, §8.1) |
 | root | `root-ok` / `root-mismatch` (recomputed tree ≠ end record) / not applicable (interrupted) |
 | integrity | `manifest-malformed` (any unparseable non-trailing line; reported with line numbers) |
-| signature | `sig-ok` / `sig-unknown-key` (provenance unverifiable, not corruption) / `sig-invalid` / `sig-missing` |
+| signature | `sig-ok` / `sig-unknown-key` (provenance unverifiable, not corruption) / `sig-invalid` / `sig-missing` / not applicable (interrupted — no end record to sign, §10.1) |
 | anchors | `ts-ok` / `ts-pending` (OTS awaiting upgrade) / `ts-missing` / `ts-invalid` (a present token fails verification or does not cover `SHA-256(E)`; per token, the run reports the worst) |
 
 An archive is **intact** iff no object is `corrupt` or `missing` and no run is
